@@ -124,7 +124,7 @@ async function askClaude(question) {
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'mixtral-8x7b-32768',  // Free open-source model
+        model: 'llama-3.1-70b-versatile',  // Free open-source model
         max_tokens: 1024,
         messages: [
           {
