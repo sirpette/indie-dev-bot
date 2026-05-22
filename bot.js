@@ -124,7 +124,7 @@ async function askClaude(question) {
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
       {
-        model: 'claude-3-haiku-20240307',
+        model: 'claude-sonnet-4-6',
         max_tokens: 1024,
         system: `You are an expert game designer helping indie developers. 
                  Keep answers concise (under 500 words), practical, and actionable.
