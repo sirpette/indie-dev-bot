@@ -122,30 +122,31 @@ async function registerCommands() {
 async function askClaude(question) {
   try {
     const response = await axios.post(
-      'https://api.anthropic.com/v1/messages',
+      'https://api.groq.com/openai/v1/chat/completions',
       {
-        model: 'claude-sonnet-4-6',
+        model: 'mixtral-8x7b-32768',  // Free open-source model
         max_tokens: 1024,
-        system: `You are an expert game designer helping indie developers. 
-                 Keep answers concise (under 500 words), practical, and actionable.
-                 Use bullet points when helpful.
-                 Focus on indie game constraints (small teams, limited budgets, tight timelines).`,
         messages: [
+          {
+            role: 'system',
+            content: `You are an expert game designer helping indie developers. 
+                     Keep answers concise (under 500 words), practical, and actionable.
+                     Use bullet points when helpful.
+                     Focus on indie game constraints (small teams, limited budgets, tight timelines).`
+          },
           { role: 'user', content: question }
         ]
       },
       {
         headers: {
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json',
-          'x-api-key': process.env.CLAUDE_API_KEY
+          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`
         }
       }
     );
 
-    return response.data.content[0].text;
+    return response.data.choices[0].message.content;
   } catch (error) {
-    console.error('❌ Claude API error:', error.response?.data || error.message);
+    console.error('❌ Groq API error:', error.response?.data || error.message);
     throw new Error(`API Error: ${error.response?.data?.error?.message || error.message}`);
   }
 }
