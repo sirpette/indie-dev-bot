@@ -8,9 +8,9 @@
     "dev": "node bot.js"
   },
   "dependencies": {
+    "axios": "^1.x",
     "discord.js": "^14.x",
     "dotenv": "^16.x",
-    "axios": "^1.x",
-    "pg": "^8.x"
+    "pg": "^8.21.0"
   }
 }

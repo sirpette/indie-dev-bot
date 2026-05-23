@@ -1,6 +1,71 @@
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { Pool } = require('pg');
 const axios = require('axios');
 require('dotenv').config();
+
+// ============================================
+// DATABASE SETUP
+// ============================================
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+});
+
+// Initialize database tables on startup
+async function initializeDatabase() {
+  try {
+    console.log('📝 Checking database tables...');
+
+    // Tester profiles table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tester_profiles (
+        id SERIAL PRIMARY KEY,
+        discord_id VARCHAR(20) UNIQUE NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        preferred_genres TEXT[] DEFAULT '{}',
+        preferred_platforms TEXT[] DEFAULT '{}',
+        playtests_completed INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Games seeking testers table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS games_seeking_testers (
+        id SERIAL PRIMARY KEY,
+        game_id VARCHAR(255) UNIQUE NOT NULL,
+        developer_id VARCHAR(20) NOT NULL,
+        developer_name VARCHAR(255) NOT NULL,
+        game_name VARCHAR(255) NOT NULL,
+        genre VARCHAR(100) NOT NULL,
+        platforms TEXT[] DEFAULT '{}',
+        testers_needed INT NOT NULL,
+        current_testers INT DEFAULT 0,
+        status VARCHAR(50) DEFAULT 'open',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // Playtest assignments table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS playtest_assignments (
+        id SERIAL PRIMARY KEY,
+        game_id VARCHAR(255) NOT NULL,
+        tester_id VARCHAR(20) NOT NULL,
+        tester_username VARCHAR(255),
+        status VARCHAR(50) DEFAULT 'assigned',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(game_id, tester_id)
+      );
+    `);
+
+    console.log('✅ Database tables ready!');
+  } catch (error) {
+    console.error('❌ Database initialization error:', error.message);
+  }
+}
 
 // ============================================
 // RATE LIMITING SYSTEM
@@ -34,13 +99,6 @@ function checkRateLimit(userId, command) {
   
   return { allowed: true, used: requests.length, limit: limit };
 }
-
-// ============================================
-// IN-MEMORY STORAGE (MVP)
-// ============================================
-const gamesLookingForTesters = new Map();
-const testerProfiles = new Map();
-const playtestAssignments = new Map();
 
 // ============================================
 // INITIALIZE DISCORD CLIENT
@@ -185,25 +243,108 @@ async function askAI(question) {
 }
 
 // ============================================
-// HELPER: Find Matching Testers
+// DATABASE HELPERS
 // ============================================
-function findMatchingTesters(genre, platforms) {
-  const matching = [];
-  
-  testerProfiles.forEach((profile, testerId) => {
-    const genreMatch = profile.preferredGenres.some(g => 
-      g.toLowerCase() === genre.toLowerCase()
+
+// Find matching testers from database
+async function findMatchingTesters(genre, platforms) {
+  try {
+    const result = await pool.query(
+      `SELECT discord_id, username FROM tester_profiles 
+       WHERE $1 = ANY(preferred_genres) OR 
+             (preferred_platforms && $2)
+       LIMIT 100`,
+      [genre.toLowerCase(), platforms.map(p => p.toLowerCase())]
     );
-    const platformMatch = profile.preferredPlatforms.some(p => 
-      platforms.map(pl => pl.toLowerCase()).includes(p.toLowerCase())
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Database error finding testers:', error.message);
+    return [];
+  }
+}
+
+// Register tester preferences in database
+async function saveTesterPreferences(discordId, username, genres, platforms) {
+  try {
+    await pool.query(
+      `INSERT INTO tester_profiles (discord_id, username, preferred_genres, preferred_platforms, updated_at)
+       VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+       ON CONFLICT (discord_id) DO UPDATE SET 
+       preferred_genres = $3,
+       preferred_platforms = $4,
+       updated_at = CURRENT_TIMESTAMP`,
+      [discordId, username, genres, platforms]
     );
-    
-    if (genreMatch || platformMatch) {
-      matching.push({ testerId, username: profile.username });
+    return true;
+  } catch (error) {
+    console.error('❌ Error saving tester preferences:', error.message);
+    return false;
+  }
+}
+
+// Register game in database
+async function registerGame(gameId, developerId, developerName, gameName, genre, platforms, testersNeeded) {
+  try {
+    await pool.query(
+      `INSERT INTO games_seeking_testers 
+       (game_id, developer_id, developer_name, game_name, genre, platforms, testers_needed, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
+      [gameId, developerId, developerName, gameName, genre.toLowerCase(), platforms, testersNeeded]
+    );
+    return true;
+  } catch (error) {
+    console.error('❌ Error registering game:', error.message);
+    return false;
+  }
+}
+
+// Get all games from database
+async function getAllGames(genre = null) {
+  try {
+    let query = 'SELECT * FROM games_seeking_testers WHERE status = \'open\' AND current_testers < testers_needed';
+    const params = [];
+
+    if (genre) {
+      query += ' AND genre = $1';
+      params.push(genre.toLowerCase());
     }
-  });
-  
-  return matching;
+
+    query += ' ORDER BY created_at DESC LIMIT 10';
+
+    const result = await pool.query(query, params);
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Error fetching games:', error.message);
+    return [];
+  }
+}
+
+// Get developer's games from database
+async function getDevGames(developerId) {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM games_seeking_testers WHERE developer_id = $1 ORDER BY created_at DESC`,
+      [developerId]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Error fetching dev games:', error.message);
+    return [];
+  }
+}
+
+// Get testers for a game
+async function getGameTesters(gameId) {
+  try {
+    const result = await pool.query(
+      `SELECT tester_id, tester_username FROM playtest_assignments WHERE game_id = $1`,
+      [gameId]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Error fetching game testers:', error.message);
+    return [];
+  }
 }
 
 // ============================================
@@ -313,7 +454,6 @@ client.on('interactionCreate', async (interaction) => {
 
 **LAUNCH DAY!** 🚀
 • Monitor social media mentions
-• Engage with early players
 • Celebrate! 🎉
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -347,7 +487,7 @@ Use \`/find-testers\` to find playtesters!
   }
 
   // ============================================
-  // /find-testers
+  // /find-testers - WITH DATABASE
   // ============================================
   else if (interaction.commandName === 'find-testers') {
     const action = interaction.options.getString('action');
@@ -378,27 +518,29 @@ Use \`/find-testers\` to find playtesters!
       const gameId = `game-${Date.now()}-${interaction.user.id}`;
       const platforms = platformsStr.split(',').map(p => p.trim());
 
-      gamesLookingForTesters.set(gameId, {
-        id: gameId,
-        developerId: interaction.user.id,
-        developerName: interaction.user.username,
-        name: gameName,
-        genre: genre.toLowerCase(),
-        platforms: platforms,
-        testersNeeded: testersNeeded,
-        currentTesters: 0,
-        status: 'open',
-        createdAt: new Date()
-      });
+      // Save to database
+      const saved = await registerGame(
+        gameId,
+        interaction.user.id,
+        interaction.user.username,
+        gameName,
+        genre,
+        platforms,
+        testersNeeded
+      );
 
-      playtestAssignments.set(gameId, []);
+      if (!saved) {
+        await interaction.editReply('❌ Error registering game. Try again.');
+        return;
+      }
+
       stats.games_registered++;
       stats.playtests_active++;
 
       // Find matching testers
-      const matchingTesters = findMatchingTesters(genre, platforms);
+      const matchingTesters = await findMatchingTesters(genre, platforms);
       const matchingInfo = matchingTesters.length > 0
-        ? `\n✅ **${matchingTesters.length} testers notified!**\nMatching: ${matchingTesters.map(t => t.username).join(', ')}`
+        ? `\n✅ **${matchingTesters.length} testers matched!**\nMatching: ${matchingTesters.map(t => t.username).join(', ')}`
         : `\n⏳ No testers with matching preferences yet.\nTesters: Use \`/find-testers action:set-preferences genre:${genre} platforms:${platformsStr}\` to get notified!`;
 
       await interaction.editReply({
@@ -416,20 +558,13 @@ ${matchingInfo}
       });
 
       console.log(`📝 Game registered: ${gameName} by ${interaction.user.username}`);
-      console.log(`📢 Found ${matchingTesters.length} matching testers`);
+      console.log(`📊 Database saved | ${matchingTesters.length} matching testers`);
     }
 
     else if (action === 'browse') {
       const genre = interaction.options.getString('genre')?.toLowerCase();
 
-      let games = Array.from(gamesLookingForTesters.values())
-        .filter(g => g.status === 'open' && g.currentTesters < g.testersNeeded);
-
-      if (genre) {
-        games = games.filter(g => g.genre === genre);
-      }
-
-      games = games.sort((a, b) => b.createdAt - a.createdAt).slice(0, 10);
+      const games = await getAllGames(genre);
 
       if (games.length === 0) {
         await interaction.reply({
@@ -441,11 +576,11 @@ ${matchingInfo}
 
       let gamesList = '🎮 **Available Playtests**\n\n';
       games.forEach((game, i) => {
-        const spotsLeft = game.testersNeeded - game.currentTesters;
-        gamesList += `${i + 1}. **${game.name}**
-   Dev: ${game.developerName}
+        const spotsLeft = game.testers_needed - game.current_testers;
+        gamesList += `${i + 1}. **${game.game_name}**
+   Dev: ${game.developer_name}
    Genre: ${game.genre} | Platforms: ${game.platforms.join(', ')}
-   🎯 Spots: ${spotsLeft}/${game.testersNeeded}
+   🎯 Spots: ${spotsLeft}/${game.testers_needed}
 
 `;
       });
@@ -457,12 +592,11 @@ ${matchingInfo}
         ephemeral: false
       });
 
-      console.log(`📊 Browsed ${games.length} games (genre: ${genre || 'all'})`);
+      console.log(`📊 Browsed ${games.length} games from database (genre: ${genre || 'all'})`);
     }
 
     else if (action === 'my-games') {
-      const devGames = Array.from(gamesLookingForTesters.values())
-        .filter(g => g.developerId === interaction.user.id);
+      const devGames = await getDevGames(interaction.user.id);
 
       if (devGames.length === 0) {
         await interaction.reply({
@@ -473,12 +607,12 @@ ${matchingInfo}
       }
 
       let gamesList = '📊 **Your Registered Games**\n\n';
-      devGames.forEach(game => {
-        const testers = playtestAssignments.get(game.id) || [];
-        gamesList += `**${game.name}**
+      devGames.forEach(async (game) => {
+        const testers = await getGameTesters(game.game_id);
+        gamesList += `**${game.game_name}**
 Status: ${game.status}
-Testers: ${testers.length}/${game.testersNeeded}
-Created: ${game.createdAt.toLocaleDateString()}
+Testers: ${testers.length}/${game.testers_needed}
+Created: ${new Date(game.created_at).toLocaleDateString()}
 
 `;
       });
@@ -488,7 +622,7 @@ Created: ${game.createdAt.toLocaleDateString()}
         ephemeral: true
       });
 
-      console.log(`📊 Dev viewing their ${devGames.length} games`);
+      console.log(`📊 Dev viewing their ${devGames.length} games from database`);
     }
 
     else if (action === 'set-preferences') {
@@ -505,16 +639,25 @@ Created: ${game.createdAt.toLocaleDateString()}
 
       const platforms = platformsStr.split(',').map(p => p.trim());
 
-      testerProfiles.set(interaction.user.id, {
-        username: interaction.user.username,
-        preferredGenres: [genre.toLowerCase()],
-        preferredPlatforms: platforms,
-        updatedAt: new Date()
-      });
+      // Save to database
+      const saved = await saveTesterPreferences(
+        interaction.user.id,
+        interaction.user.username,
+        [genre.toLowerCase()],
+        platforms
+      );
+
+      if (!saved) {
+        await interaction.reply({
+          content: '❌ Error saving preferences. Try again.',
+          ephemeral: true
+        });
+        return;
+      }
 
       await interaction.reply({
         content: `
-✅ **Preferences Saved!**
+✅ **Preferences Saved to Database!**
 
 You'll be notified when games matching your preferences are registered:
 📌 Genres: ${genre}
@@ -525,7 +668,7 @@ Now when developers register games with these tags, you'll see them when you use
         ephemeral: true
       });
 
-      console.log(`👤 Tester ${interaction.user.username} set preferences: ${genre} + ${platformsStr}`);
+      console.log(`👤 Tester ${interaction.user.username} saved preferences in DB: ${genre} + ${platformsStr}`);
     }
   }
 });
@@ -557,13 +700,27 @@ setInterval(() => {
 ║ Active Playtests: ${stats.playtests_active}
 ║ Errors: ${stats.errors}
 ║ Servers: ${stats.servers.size}
+║ Database: PostgreSQL ✅
 ╚════════════════════════════════════════╝
   `);
 }, 60 * 60 * 1000);
 
 // ============================================
+// DATABASE CLEANUP ON SHUTDOWN
+// ============================================
+process.on('SIGINT', async () => {
+  console.log('\n👋 Shutting down...');
+  await pool.end();
+  process.exit(0);
+});
+
+// ============================================
 // LOGIN
 // ============================================
-client.login(process.env.DISCORD_TOKEN);
+async function start() {
+  await initializeDatabase();
+  client.login(process.env.DISCORD_TOKEN);
+  console.log('🤖 Bot starting...');
+}
 
-console.log('🤖 Bot starting...');
+start();
