@@ -11,12 +11,10 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Initialize database tables on startup
 async function initializeDatabase() {
   try {
     console.log('📝 Checking database tables...');
 
-    // Tester profiles table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS tester_profiles (
         id SERIAL PRIMARY KEY,
@@ -30,7 +28,6 @@ async function initializeDatabase() {
       );
     `);
 
-    // Games seeking testers table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS games_seeking_testers (
         id SERIAL PRIMARY KEY,
@@ -48,7 +45,6 @@ async function initializeDatabase() {
       );
     `);
 
-    // Playtest assignments table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS playtest_assignments (
         id SERIAL PRIMARY KEY,
@@ -174,12 +170,15 @@ async function registerCommands() {
             { name: 'register', value: 'register' },
             { name: 'browse', value: 'browse' },
             { name: 'my-games', value: 'my-games' },
-            { name: 'set-preferences', value: 'set-preferences' }
+            { name: 'set-preferences', value: 'set-preferences' },
+            { name: 'register-for-test', value: 'register-for-test' },
+            { name: 'my-playtests', value: 'my-playtests' },
+            { name: 'withdraw', value: 'withdraw' }
           )
       )
       .addStringOption(option =>
         option.setName('game')
-          .setDescription('Game name (for register)')
+          .setDescription('Game name')
       )
       .addStringOption(option =>
         option.setName('genre')
@@ -246,7 +245,6 @@ async function askAI(question) {
 // DATABASE HELPERS
 // ============================================
 
-// Find matching testers from database
 async function findMatchingTesters(genre, platforms) {
   try {
     const result = await pool.query(
@@ -263,7 +261,6 @@ async function findMatchingTesters(genre, platforms) {
   }
 }
 
-// Register tester preferences in database
 async function saveTesterPreferences(discordId, username, genres, platforms) {
   try {
     await pool.query(
@@ -282,7 +279,6 @@ async function saveTesterPreferences(discordId, username, genres, platforms) {
   }
 }
 
-// Register game in database
 async function registerGame(gameId, developerId, developerName, gameName, genre, platforms, testersNeeded) {
   try {
     await pool.query(
@@ -298,7 +294,6 @@ async function registerGame(gameId, developerId, developerName, gameName, genre,
   }
 }
 
-// Get all games from database
 async function getAllGames(genre = null) {
   try {
     let query = 'SELECT * FROM games_seeking_testers WHERE status = \'open\' AND current_testers < testers_needed';
@@ -319,7 +314,6 @@ async function getAllGames(genre = null) {
   }
 }
 
-// Get developer's games from database
 async function getDevGames(developerId) {
   try {
     const result = await pool.query(
@@ -333,7 +327,6 @@ async function getDevGames(developerId) {
   }
 }
 
-// Get testers for a game
 async function getGameTesters(gameId) {
   try {
     const result = await pool.query(
@@ -344,6 +337,69 @@ async function getGameTesters(gameId) {
   } catch (error) {
     console.error('❌ Error fetching game testers:', error.message);
     return [];
+  }
+}
+
+async function registerForTest(gameId, testerId, testerUsername) {
+  try {
+    await pool.query(
+      `INSERT INTO playtest_assignments (game_id, tester_id, tester_username, status)
+       VALUES ($1, $2, $3, 'assigned')`,
+      [gameId, testerId, testerUsername]
+    );
+    return true;
+  } catch (error) {
+    if (error.code === '23505') {
+      // Unique constraint violation - already registered
+      return false;
+    }
+    console.error('❌ Error registering for test:', error.message);
+    return false;
+  }
+}
+
+async function getTesterPlaytests(testerId) {
+  try {
+    const result = await pool.query(
+      `SELECT g.game_id, g.game_name, g.developer_name, g.genre, g.platforms, pa.created_at
+       FROM playtest_assignments pa
+       JOIN games_seeking_testers g ON pa.game_id = g.game_id
+       WHERE pa.tester_id = $1
+       ORDER BY pa.created_at DESC`,
+      [testerId]
+    );
+    return result.rows;
+  } catch (error) {
+    console.error('❌ Error fetching tester playtests:', error.message);
+    return [];
+  }
+}
+
+async function withdrawFromTest(gameId, testerId) {
+  try {
+    const result = await pool.query(
+      `DELETE FROM playtest_assignments 
+       WHERE game_id = $1 AND tester_id = $2`,
+      [gameId, testerId]
+    );
+    return result.rowCount > 0;
+  } catch (error) {
+    console.error('❌ Error withdrawing from test:', error.message);
+    return false;
+  }
+}
+
+async function getGameByName(gameName) {
+  try {
+    const result = await pool.query(
+      `SELECT game_id FROM games_seeking_testers 
+       WHERE LOWER(game_name) = LOWER($1) LIMIT 1`,
+      [gameName]
+    );
+    return result.rows[0];
+  } catch (error) {
+    console.error('❌ Error finding game:', error.message);
+    return null;
   }
 }
 
@@ -487,11 +543,12 @@ Use \`/find-testers\` to find playtesters!
   }
 
   // ============================================
-  // /find-testers - WITH DATABASE
+  // /find-testers - FULL MARKETPLACE
   // ============================================
   else if (interaction.commandName === 'find-testers') {
     const action = interaction.options.getString('action');
 
+    // REGISTER GAME (Developer)
     if (action === 'register') {
       const { allowed } = checkRateLimit(interaction.user.id, 'find-testers');
       
@@ -518,7 +575,6 @@ Use \`/find-testers\` to find playtesters!
       const gameId = `game-${Date.now()}-${interaction.user.id}`;
       const platforms = platformsStr.split(',').map(p => p.trim());
 
-      // Save to database
       const saved = await registerGame(
         gameId,
         interaction.user.id,
@@ -537,7 +593,6 @@ Use \`/find-testers\` to find playtesters!
       stats.games_registered++;
       stats.playtests_active++;
 
-      // Find matching testers
       const matchingTesters = await findMatchingTesters(genre, platforms);
       const matchingInfo = matchingTesters.length > 0
         ? `\n✅ **${matchingTesters.length} testers matched!**\nMatching: ${matchingTesters.map(t => t.username).join(', ')}`
@@ -558,9 +613,9 @@ ${matchingInfo}
       });
 
       console.log(`📝 Game registered: ${gameName} by ${interaction.user.username}`);
-      console.log(`📊 Database saved | ${matchingTesters.length} matching testers`);
     }
 
+    // BROWSE GAMES (Tester)
     else if (action === 'browse') {
       const genre = interaction.options.getString('genre')?.toLowerCase();
 
@@ -581,20 +636,21 @@ ${matchingInfo}
    Dev: ${game.developer_name}
    Genre: ${game.genre} | Platforms: ${game.platforms.join(', ')}
    🎯 Spots: ${spotsLeft}/${game.testers_needed}
+   
+   Use: \`/find-testers action:register-for-test game:"${game.game_name}"\`
 
 `;
       });
-
-      gamesList += `_React to apply or use \`/find-testers action:set-preferences\` to get auto-notified!_`;
 
       await interaction.reply({
         content: gamesList,
         ephemeral: false
       });
 
-      console.log(`📊 Browsed ${games.length} games from database (genre: ${genre || 'all'})`);
+      console.log(`📊 Browsed ${games.length} games from database`);
     }
 
+    // MY GAMES (Developer)
     else if (action === 'my-games') {
       const devGames = await getDevGames(interaction.user.id);
 
@@ -607,7 +663,7 @@ ${matchingInfo}
       }
 
       let gamesList = '📊 **Your Registered Games**\n\n';
-      devGames.forEach(async (game) => {
+      for (const game of devGames) {
         const testers = await getGameTesters(game.game_id);
         gamesList += `**${game.game_name}**
 Status: ${game.status}
@@ -615,16 +671,17 @@ Testers: ${testers.length}/${game.testers_needed}
 Created: ${new Date(game.created_at).toLocaleDateString()}
 
 `;
-      });
+      }
 
       await interaction.reply({
         content: gamesList,
         ephemeral: true
       });
 
-      console.log(`📊 Dev viewing their ${devGames.length} games from database`);
+      console.log(`📊 Dev viewing their games`);
     }
 
+    // SET PREFERENCES (Tester)
     else if (action === 'set-preferences') {
       const genre = interaction.options.getString('genre');
       const platformsStr = interaction.options.getString('platforms') || 'PC';
@@ -639,7 +696,6 @@ Created: ${new Date(game.created_at).toLocaleDateString()}
 
       const platforms = platformsStr.split(',').map(p => p.trim());
 
-      // Save to database
       const saved = await saveTesterPreferences(
         interaction.user.id,
         interaction.user.username,
@@ -657,18 +713,139 @@ Created: ${new Date(game.created_at).toLocaleDateString()}
 
       await interaction.reply({
         content: `
-✅ **Preferences Saved to Database!**
+✅ **Preferences Saved!**
 
-You'll be notified when games matching your preferences are registered:
 📌 Genres: ${genre}
 📌 Platforms: ${platforms.join(', ')}
 
-Now when developers register games with these tags, you'll see them when you use \`/find-testers action:browse\`!
+Use \`/find-testers action:browse genre:${genre}\` to see matching games!
         `,
         ephemeral: true
       });
 
-      console.log(`👤 Tester ${interaction.user.username} saved preferences in DB: ${genre} + ${platformsStr}`);
+      console.log(`👤 Tester ${interaction.user.username} saved preferences`);
+    }
+
+    // REGISTER FOR TEST (Tester)
+    else if (action === 'register-for-test') {
+      const gameName = interaction.options.getString('game');
+
+      if (!gameName) {
+        await interaction.reply({
+          content: '❌ Please specify game name!',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const game = await getGameByName(gameName);
+
+      if (!game) {
+        await interaction.reply({
+          content: `❌ Game "${gameName}" not found. Use \`/find-testers action:browse\` to see available games!`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const registered = await registerForTest(game.game_id, interaction.user.id, interaction.user.username);
+
+      if (!registered) {
+        await interaction.reply({
+          content: `❌ You're already registered for this game or error occurred!`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: `
+✅ **You're Now Testing!**
+
+Game: **${gameName}**
+
+Developer will contact you soon!
+Use \`/find-testers action:my-playtests\` to see your tests.
+        `,
+        ephemeral: true
+      });
+
+      console.log(`✅ Tester ${interaction.user.username} registered for ${gameName}`);
+    }
+
+    // MY PLAYTESTS (Tester)
+    else if (action === 'my-playtests') {
+      const playtests = await getTesterPlaytests(interaction.user.id);
+
+      if (playtests.length === 0) {
+        await interaction.reply({
+          content: `❌ You're not registered for any playtests yet!\nUse \`/find-testers action:browse\` to find games!`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      let playtestList = '📋 **Your Active Playtests**\n\n';
+      playtests.forEach((test, i) => {
+        playtestList += `${i + 1}. **${test.game_name}**
+   Developer: ${test.developer_name}
+   Genre: ${test.genre}
+   
+   Use: \`/find-testers action:withdraw game:"${test.game_name}"\` to withdraw
+
+`;
+      });
+
+      await interaction.reply({
+        content: playtestList,
+        ephemeral: true
+      });
+
+      console.log(`📋 Tester viewing playtests`);
+    }
+
+    // WITHDRAW (Tester)
+    else if (action === 'withdraw') {
+      const gameName = interaction.options.getString('game');
+
+      if (!gameName) {
+        await interaction.reply({
+          content: '❌ Please specify game name!',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const game = await getGameByName(gameName);
+
+      if (!game) {
+        await interaction.reply({
+          content: `❌ Game "${gameName}" not found!`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const withdrawn = await withdrawFromTest(game.game_id, interaction.user.id);
+
+      if (!withdrawn) {
+        await interaction.reply({
+          content: `❌ You're not registered for this game!`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        content: `
+✅ **Withdrawn!**
+
+You've been removed from testing **${gameName}**.
+        `,
+        ephemeral: true
+      });
+
+      console.log(`🚫 Tester ${interaction.user.username} withdrew from ${gameName}`);
     }
   }
 });
@@ -706,7 +883,7 @@ setInterval(() => {
 }, 60 * 60 * 1000);
 
 // ============================================
-// DATABASE CLEANUP ON SHUTDOWN
+// DATABASE CLEANUP
 // ============================================
 process.on('SIGINT', async () => {
   console.log('\n👋 Shutting down...');
@@ -715,7 +892,7 @@ process.on('SIGINT', async () => {
 });
 
 // ============================================
-// LOGIN
+// START BOT
 // ============================================
 async function start() {
   await initializeDatabase();
