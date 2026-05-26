@@ -43,10 +43,13 @@ async function initializeDatabase() {
         testers_needed INT NOT NULL,
         current_testers INT DEFAULT 0,
         status VARCHAR(50) DEFAULT 'open',
+        guild_id VARCHAR(20),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    await pool.query(`ALTER TABLE games_seeking_testers ADD COLUMN IF NOT EXISTS guild_id VARCHAR(20);`);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS playtest_assignments (
@@ -298,13 +301,13 @@ async function saveTesterPreferences(discordId, username, genres, platforms) {
   }
 }
 
-async function registerGame(gameId, developerId, developerName, gameName, genre, platforms, testersNeeded) {
+async function registerGame(gameId, developerId, developerName, gameName, genre, platforms, testersNeeded, guildId) {
   try {
     await pool.query(
       `INSERT INTO games_seeking_testers 
-       (game_id, developer_id, developer_name, game_name, genre, platforms, testers_needed, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
-      [gameId, developerId, developerName, gameName, genre.toLowerCase(), platforms, testersNeeded]
+       (game_id, developer_id, developer_name, game_name, genre, platforms, testers_needed, status, guild_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
+      [gameId, developerId, developerName, gameName, genre.toLowerCase(), platforms, testersNeeded, guildId]
     );
     return true;
   } catch (error) {
@@ -601,7 +604,8 @@ Use \`/find-testers\` to find playtesters!
         gameName,
         genre,
         platforms,
-        testersNeeded
+        testersNeeded,
+        interaction.guildId
       );
 
       if (!saved) {
