@@ -124,6 +124,10 @@ const stats = {
 // ============================================
 client.once('ready', () => {
   console.log(`✅ Bot logged in as ${client.user.tag}`);
+  console.log(`🔑 OWNER_ID: ${OWNER_ID || 'CHYBÍ!'}`);
+  console.log(`🔑 ADMIN_GUILD_ID: ${ADMIN_GUILD_ID || 'CHYBÍ!'}`);
+  console.log(`📊 Bot je na ${client.guilds.cache.size} serverech:`);
+  client.guilds.cache.forEach(g => console.log(`   - ${g.name} (ID: ${g.id})`));
   registerCommands();
   client.user.setActivity('/find-testers', { type: 'LISTENING' });
 });
