@@ -3,6 +3,9 @@ const { Pool } = require('pg');
 const axios = require('axios');
 require('dotenv').config();
 
+const OWNER_ID = process.env.OWNER_ID;
+const ADMIN_GUILD_ID = process.env.ADMIN_GUILD_ID;
+
 // ============================================
 // DATABASE SETUP
 // ============================================
@@ -200,6 +203,18 @@ async function registerCommands() {
     console.log('📝 Registering commands...');
     const commandsJSON = commands.map(cmd => cmd.toJSON());
     await client.application.commands.set(commandsJSON);
+    // stats jen na tvém serveru - nikde jinde se nezobrazí
+    const statsCommand = new SlashCommandBuilder()
+      .setName('stats')
+      .setDescription('Bot statistics (owner only)');
+
+    const guild = client.guilds.cache.get(ADMIN_GUILD_ID);
+    if (guild) {
+      await guild.commands.create(statsCommand.toJSON());
+      console.log('✅ Stats command registered (admin guild only)');
+    } else {
+      console.log('⚠️ Admin guild not found - is bot on your server?');
+    }
     console.log('✅ Commands registered:', commandsJSON.map(c => c.name).join(', '));
   } catch (error) {
     console.error('❌ Error registering commands:', error.message);
@@ -846,6 +861,27 @@ You've been removed from testing **${gameName}**.
       });
 
       console.log(`🚫 Tester ${interaction.user.username} withdrew from ${gameName}`);
+    }
+  }
+
+  else if (interaction.commandName === 'stats') {
+    if (interaction.user.id !== OWNER_ID) {
+      await interaction.reply({ content: '❌ Restricted.', ephemeral: true });
+      return;
+    }
+
+    const guilds = client.guilds.cache;
+    const serverList = guilds.map(g => `• ${g.name} (${g.memberCount})`).join('\n');
+    const message = `📊 **Bot Stats**\n\nServers: ${guilds.size}\n${serverList}\n\nCommands run: ${stats.commands_run}\nGames registered: ${stats.games_registered}`;
+
+    try {
+      await interaction.user.send(message);
+      await interaction.reply({ content: '✅ Posláno do DM!', ephemeral: true });
+    } catch (err) {
+      await interaction.reply({
+        content: '❌ Nepodařilo se poslat DM. Zkontroluj, že máš povolené zprávy od serverových botů.',
+        ephemeral: true
+      });
     }
   }
 });
